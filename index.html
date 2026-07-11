@@ -402,6 +402,20 @@
     <div class="page-head"><div><h1>Inversiones</h1><p>Tus acciones, fondos y cripto, con su valor y ganancia. Pulsa "Actualizar precios" para traerlos al momento.</p></div>
       <button class="btn ghost sm" onclick="refreshPrices()"><span class="bic" data-i="refresh"></span>Actualizar precios</button></div>
     <div class="grid g-3" id="inv-stats" style="margin-bottom:16px"></div>
+    <div class="card pad-lg" id="inv-chart-card" style="margin-bottom:16px">
+      <div class="nw-head">
+        <div><div class="section-title" style="margin:0">Evolución de la cartera</div><div class="nw-change" id="inv-change"></div></div>
+        <div class="range-seg" id="inv-range" role="tablist" aria-label="Rango temporal">
+          <button data-r="1D" onclick="setInvRange('1D')">1D</button>
+          <button data-r="1S" onclick="setInvRange('1S')">1S</button>
+          <button data-r="1M" onclick="setInvRange('1M')">1M</button>
+          <button data-r="6M" onclick="setInvRange('6M')">6M</button>
+          <button data-r="1A" onclick="setInvRange('1A')">1A</button>
+          <button data-r="MAX" onclick="setInvRange('MAX')">Máx</button>
+        </div>
+      </div>
+      <div id="inv-chart"></div>
+    </div>
     <div class="card pad-lg" id="inv-pie-card" style="margin-bottom:16px"><div class="section-title">Reparto de la cartera</div><div id="inv-pie"></div></div>
     <div class="add-row">
       <div class="field" style="flex:0 0 110px"><label>Ticker</label><input id="hd-ticker" placeholder="AAPL"></div>
@@ -751,9 +765,9 @@ function renderInv(){
     ${stat('Valor de la cartera',cv(val),S.holdings.length+' posiciones','hero')}
     ${stat('Coste invertido',cv(cost),'Lo que pusiste')}
     ${stat('Ganancia / pérdida',cv(gain),pct(gpct),gain>=0?'':'')}`;
-  const b=document.getElementById('hd-body'),pieCard=document.getElementById('inv-pie-card');
-  if(!S.holdings.length){pieCard.style.display='none';b.innerHTML=`<tr><td colspan="7">${emptyState('inversiones','Sin inversiones','Añade tus acciones, fondos o cripto para seguir su valor y tu ganancia.',`<button class="btn sm" onclick="document.getElementById('hd-ticker').focus()">Añadir activo</button>`)}</td></tr>`;return;}
-  pieCard.style.display='';drawInvPie();
+  const b=document.getElementById('hd-body'),pieCard=document.getElementById('inv-pie-card'),chartCard=document.getElementById('inv-chart-card');
+  if(!S.holdings.length){pieCard.style.display='none';if(chartCard)chartCard.style.display='none';b.innerHTML=`<tr><td colspan="7">${emptyState('inversiones','Sin inversiones','Añade tus acciones, fondos o cripto para seguir su valor y tu ganancia.',`<button class="btn sm" onclick="document.getElementById('hd-ticker').focus()">Añadir activo</button>`)}</td></tr>`;return;}
+  pieCard.style.display='';if(chartCard)chartCard.style.display='';drawInvChart();drawInvPie();
   b.innerHTML=S.holdings.map(h=>{
     const v=h.shares*h.price,g=v-h.shares*h.avgCost,gp=h.avgCost?g/(h.shares*h.avgCost)*100:0;
     return `<tr><td><b>${h.ticker}</b><div style="font-size:12px;color:var(--faint)">${esc(h.name)}</div></td>
@@ -861,79 +875,76 @@ function renderRecent(){
 /* ---------------- gráficos SVG ---------------- */
 const PAL=['#2f6f5e','#4db699','#6c8ebf','#d99a2b','#b07bac','#d15b52','#7a9e7e','#c2a878','#8888aa'];
 const RANGES={'1D':1,'1S':7,'1M':30,'6M':182,'1A':365,'MAX':null};
-let _nwData=null;
-function nwPoints(){
-  // historial normalizado {t,v} + un punto "ahora" para que la curva llegue a hoy
-  const all=(S.history||[]).filter(p=>p&&typeof p.t==='number'&&typeof p.v==='number').slice().sort((a,b)=>a.t-b.t);
-  const now=Date.now(),v=netWorth(),last=all[all.length-1];
-  if(!last||last.v!==v||(now-last.t)>3600000)all.push({t:now,v});
+// Gráfico de evolución genérico y reutilizable (patrimonio y cartera).
+const EVO_CFG={
+  nw: {box:'nw-chart', rangeSel:'nw-range', change:'nw-change', svg:'nw-svg', cursor:'nw-cursor', hot:'nw-hot', tip:'nw-tip', grad:'grad-nw', field:'v',   rangeKey:'nwRange',  cur:()=>netWorth()},
+  inv:{box:'inv-chart',rangeSel:'inv-range',change:'inv-change',svg:'inv-svg',cursor:'inv-cursor',hot:'inv-hot',tip:'inv-tip',grad:'grad-inv',field:'inv',rangeKey:'invRange', cur:()=>invValue()}
+};
+const EVO_DATA={};
+function evoRange(id){return (S.settings[EVO_CFG[id].rangeKey])||'1M';}
+function evoPoints(field,curVal){
+  const all=(S.history||[]).filter(p=>p&&typeof p.t==='number'&&typeof p[field]==='number').map(p=>({t:p.t,val:p[field]})).sort((a,b)=>a.t-b.t);
+  const now=Date.now(),last=all[all.length-1];
+  if(!last||last.val!==curVal||(now-last.t)>3600000)all.push({t:now,val:curVal});
   return all;
 }
-function nwSeries(range){
-  let pts=nwPoints();
+function evoSeries(field,curVal,range){
+  let pts=evoPoints(field,curVal);
   const days=RANGES[range],now=Date.now();
-  if(days){
-    const from=now-days*86400000;
-    const win=pts.filter(p=>p.t>=from);
-    pts = win.length>=2 ? win : pts.slice(-2);
-  }
-  if(pts.length>170){ // downsample a ~150 puntos (último de cada cubo)
-    const N=150,out=[],step=pts.length/N;
-    for(let i=0;i<N;i++){const seg=pts.slice(Math.floor(i*step),Math.floor((i+1)*step));if(seg.length)out.push(seg[seg.length-1]);}
-    if(out[out.length-1]!==pts[pts.length-1])out.push(pts[pts.length-1]);
-    pts=out;
-  }
+  if(days){const from=now-days*86400000;const win=pts.filter(p=>p.t>=from);pts=win.length>=2?win:pts.slice(-2);}
+  if(pts.length>170){const N=150,out=[],step=pts.length/N;for(let i=0;i<N;i++){const seg=pts.slice(Math.floor(i*step),Math.floor((i+1)*step));if(seg.length)out.push(seg[seg.length-1]);}if(out[out.length-1]!==pts[pts.length-1])out.push(pts[pts.length-1]);pts=out;}
   return pts;
 }
 function nwRangeLabel(r){return {'1D':'hoy','1S':'esta semana','1M':'este mes','6M':'6 meses','1A':'1 año','MAX':'histórico'}[r]||'';}
-function setNwRange(r){S.settings.nwRange=r;save();drawNWChart();}
-function fmtTipDate(t){const d=new Date(t),r=S.settings.nwRange||'1M';
+function fmtTipDate(t,range){const d=new Date(t),r=range||'1M';
   if(r==='1D')return d.toLocaleTimeString(S.settings.locale,{hour:'2-digit',minute:'2-digit'});
   return d.toLocaleDateString(S.settings.locale,{day:'numeric',month:'short',year:(r==='1A'||r==='MAX')?'2-digit':undefined});}
-function drawNWChart(){
-  const box=document.getElementById('nw-chart'),chg=document.getElementById('nw-change');
-  const range=S.settings.nwRange||'1M';
-  document.querySelectorAll('#nw-range button').forEach(b=>b.classList.toggle('active',b.dataset.r===range));
-  const raw=(S.history||[]).filter(p=>p&&typeof p.t==='number');
-  if(!raw.length){ if(chg)chg.textContent=''; box.innerHTML=`<div class="empty" style="padding:44px 20px">Tu evolución se irá dibujando sola.<br>Cada día que abras la app se guarda un punto automáticamente.</div>`; return; }
-  const data=nwSeries(range);
+function drawEvo(id){
+  const cfg=EVO_CFG[id],box=document.getElementById(cfg.box);if(!box)return;
+  const range=evoRange(id),chg=document.getElementById(cfg.change);
+  document.querySelectorAll('#'+cfg.rangeSel+' button').forEach(b=>b.classList.toggle('active',b.dataset.r===range));
+  const raw=(S.history||[]).filter(p=>p&&typeof p.t==='number'&&typeof p[cfg.field]==='number');
+  if(!raw.length){ if(chg)chg.textContent=''; box.innerHTML=`<div class="empty" style="padding:44px 20px">Se irá dibujando sola.<br>Cada día que abras la app se guarda un punto automáticamente.</div>`; return; }
+  const data=evoSeries(cfg.field,cfg.cur(),range);
   const w=560,h=210,padX=10,padT=16,padB=26;
-  const vals=data.map(d=>d.v),min=Math.min(...vals),max=Math.max(...vals);
+  const vals=data.map(d=>d.val),min=Math.min(...vals),max=Math.max(...vals);
   const span=(max-min)||Math.max(1,Math.abs(max)*0.02),lo=min-span*0.12,hi=max+span*0.12;
   const X=i=>padX+i*(w-padX*2)/Math.max(1,data.length-1),Y=v=>padT+(hi-v)/((hi-lo)||1)*(h-padT-padB);
-  const pxpts=data.map((d,i)=>({t:d.t,v:d.v,x:X(i),y:Y(d.v)}));
-  _nwData={pts:pxpts,w,h};
+  const pxpts=data.map((d,i)=>({t:d.t,v:d.val,x:X(i),y:Y(d.val)}));
+  EVO_DATA[id]={pts:pxpts,w,h};
   const line=pxpts.map((p,i)=>`${i?'L':'M'}${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(' ');
   const area=line+` L${pxpts[pxpts.length-1].x.toFixed(1)},${h-padB} L${pxpts[0].x.toFixed(1)},${h-padB} Z`;
-  const first=data[0].v,lastV=data[data.length-1].v,diff=lastV-first,pct=first?diff/Math.abs(first)*100:0,up=diff>=0;
+  const first=data[0].val,lastV=data[data.length-1].val,diff=lastV-first,pct=first?diff/Math.abs(first)*100:0,up=diff>=0;
   if(chg)chg.innerHTML=`<span class="${up?'up':'down'}">${up?'▲':'▼'} ${fmt(Math.abs(diff))} · ${up?'+':'−'}${Math.abs(pct).toFixed(1)}%</span> <span class="nw-range-lbl">${nwRangeLabel(range)}</span>`;
-  let xlabels='';
-  const nLab=Math.min(5,data.length);
-  if(data.length>=2)for(let k=0;k<nLab;k++){const i=Math.round(k*(data.length-1)/(nLab-1)),p=pxpts[i];xlabels+=`<text x="${p.x.toFixed(1)}" y="${h-8}" font-size="10" fill="var(--faint)" text-anchor="${k===0?'start':k===nLab-1?'end':'middle'}">${esc(fmtTipDate(p.t))}</text>`;}
-  box.innerHTML=`<div class="nw-wrap"><div class="nw-tip" id="nw-tip"></div>
-    <svg id="nw-svg" viewBox="0 0 ${w} ${h}" width="100%" style="display:block;touch-action:none" onmousemove="nwHover(event)" onmouseleave="nwLeave()">
-      <defs><linearGradient id="g1" x1="0" y1="0" x2="0" y2="1">
+  let xlabels='';const nLab=Math.min(5,data.length);
+  if(data.length>=2)for(let k=0;k<nLab;k++){const i=Math.round(k*(data.length-1)/(nLab-1)),p=pxpts[i];xlabels+=`<text x="${p.x.toFixed(1)}" y="${h-8}" font-size="10" fill="var(--faint)" text-anchor="${k===0?'start':k===nLab-1?'end':'middle'}">${esc(fmtTipDate(p.t,range))}</text>`;}
+  box.innerHTML=`<div class="nw-wrap"><div class="nw-tip" id="${cfg.tip}"></div>
+    <svg id="${cfg.svg}" viewBox="0 0 ${w} ${h}" width="100%" style="display:block;touch-action:none" onmousemove="evoHover('${id}',event)" onmouseleave="evoLeave('${id}')">
+      <defs><linearGradient id="${cfg.grad}" x1="0" y1="0" x2="0" y2="1">
         <stop offset="0" stop-color="var(--accent)" stop-opacity=".22"/>
         <stop offset="1" stop-color="var(--accent)" stop-opacity="0"/></linearGradient></defs>
-      <path d="${area}" fill="url(#g1)"/>
+      <path d="${area}" fill="url(#${cfg.grad})"/>
       <path d="${line}" fill="none" stroke="var(--accent)" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>
-      <line id="nw-cursor" x1="0" y1="${padT}" x2="0" y2="${h-padB}" stroke="var(--faint)" stroke-width="1" stroke-dasharray="3 3" style="opacity:0"/>
-      <circle id="nw-hot" r="4.2" fill="var(--surface)" stroke="var(--accent)" stroke-width="2.5" style="opacity:0"/>
+      <line id="${cfg.cursor}" x1="0" y1="${padT}" x2="0" y2="${h-padB}" stroke="var(--faint)" stroke-width="1" stroke-dasharray="3 3" style="opacity:0"/>
+      <circle id="${cfg.hot}" r="4.2" fill="var(--surface)" stroke="var(--accent)" stroke-width="2.5" style="opacity:0"/>
       ${data.length<=1?`<circle cx="${pxpts[0].x.toFixed(1)}" cy="${pxpts[0].y.toFixed(1)}" r="3.6" fill="var(--surface)" stroke="var(--accent)" stroke-width="2"/>`:''}
       ${xlabels}
     </svg></div>`;
 }
-function nwHover(evt){
-  const d=_nwData;if(!d||!d.pts.length)return;
-  const svg=document.getElementById('nw-svg');if(!svg)return;
-  const rect=svg.getBoundingClientRect();if(!rect.width)return;
+function evoHover(id,evt){
+  const d=EVO_DATA[id];if(!d||!d.pts.length)return;const cfg=EVO_CFG[id];
+  const svg=document.getElementById(cfg.svg);if(!svg)return;const rect=svg.getBoundingClientRect();if(!rect.width)return;
   const vx=(evt.clientX-rect.left)/rect.width*d.w;
   let best=d.pts[0];for(const p of d.pts)if(Math.abs(p.x-vx)<Math.abs(best.x-vx))best=p;
-  const cur=document.getElementById('nw-cursor');if(cur){cur.setAttribute('x1',best.x);cur.setAttribute('x2',best.x);cur.style.opacity='1';}
-  const dot=document.getElementById('nw-hot');if(dot){dot.setAttribute('cx',best.x);dot.setAttribute('cy',best.y);dot.style.opacity='1';}
-  const tip=document.getElementById('nw-tip');if(tip){tip.innerHTML=`<b>${fmt(best.v)}</b>${esc(fmtTipDate(best.t))}`;tip.style.left=((best.x/d.w)*rect.width)+'px';tip.style.opacity='1';}
+  const cur=document.getElementById(cfg.cursor);if(cur){cur.setAttribute('x1',best.x);cur.setAttribute('x2',best.x);cur.style.opacity='1';}
+  const dot=document.getElementById(cfg.hot);if(dot){dot.setAttribute('cx',best.x);dot.setAttribute('cy',best.y);dot.style.opacity='1';}
+  const tip=document.getElementById(cfg.tip);if(tip){tip.innerHTML=`<b>${fmt(best.v)}</b>${esc(fmtTipDate(best.t,evoRange(id)))}`;tip.style.left=((best.x/d.w)*rect.width)+'px';tip.style.opacity='1';}
 }
-function nwLeave(){['nw-cursor','nw-hot','nw-tip'].forEach(id=>{const e=document.getElementById(id);if(e)e.style.opacity='0';});}
+function evoLeave(id){const cfg=EVO_CFG[id];[cfg.cursor,cfg.hot,cfg.tip].forEach(k=>{const e=document.getElementById(k);if(e)e.style.opacity='0';});}
+function drawNWChart(){drawEvo('nw');}
+function drawInvChart(){drawEvo('inv');}
+function setNwRange(r){S.settings.nwRange=r;save();drawEvo('nw');}
+function setInvRange(r){S.settings.invRange=r;save();drawEvo('inv');}
 function drawAlloc(){
   const box=document.getElementById('alloc-chart');
   const groups={'Efectivo y bancos':liquid(),'Inversiones':invValue(),
@@ -1221,9 +1232,9 @@ function migrateHistory(){
 // Registra el patrimonio de hoy automáticamente (al abrir la app y al refrescar precios).
 function recordSnapshot(force){
   if(!Array.isArray(S.history))S.history=[];
-  const now=Date.now(),v=netWorth(),last=S.history[S.history.length-1];
-  if(last&&!force&&last.v===v&&(now-last.t)<6*3600000)return; // sin cambios recientes: no dupliques
-  S.history.push({t:now,v});
+  const now=Date.now(),v=netWorth(),inv=invValue(),last=S.history[S.history.length-1];
+  if(last&&!force&&last.v===v&&last.inv===inv&&(now-last.t)<6*3600000)return; // sin cambios recientes: no dupliques
+  S.history.push({t:now,v,inv});
   if(S.history.length>2000)S.history=S.history.slice(-2000);
   save();
 }
