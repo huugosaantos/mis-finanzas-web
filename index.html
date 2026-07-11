@@ -520,6 +520,7 @@
 
 <!-- Informe del día: lo reescribe el agente de las 9:00. Si no existe todavía, no pasa nada. -->
 <script src="informe.js" onerror="window.__noInforme=true"></script>
+<script>if('serviceWorker' in navigator && location.protocol==='https:'){window.addEventListener('load',function(){navigator.serviceWorker.register('sw.js').catch(function(){});});}</script>
 <script>
 /* ---------------- estado ---------------- */
 const KEY='misfinanzas.v2';
