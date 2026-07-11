@@ -1356,6 +1356,15 @@ const SYNC_KEY='misfinanzas.sync';
 function loadSyncCfg(){try{return JSON.parse(localStorage.getItem(SYNC_KEY))||{};}catch(e){return {};}}
 function saveSyncCfg(c){localStorage.setItem(SYNC_KEY,JSON.stringify(c));}
 function syncEnabled(){const c=loadSyncCfg();return !!(c.enabled&&c.token&&c.pass);}
+function isEmptyState(s){return !s||((!s.transactions||!s.transactions.length)&&(!s.accounts||!s.accounts.length)&&(!s.holdings||!s.holdings.length));}
+// Nunca dejar que un estado VACÍO pise datos reales; entre dos con datos, gana el más reciente.
+function remoteWins(remote){
+  if(!remote||!remote.S)return false;
+  const rEmpty=isEmptyState(remote.S),lEmpty=isEmptyState(S);
+  if(rEmpty&&!lEmpty)return false;
+  if(!rEmpty&&lEmpty)return true;
+  return (remote.S.updatedAt||0)>(S.updatedAt||0);
+}
 async function encStr(pass,str){
   const salt=crypto.getRandomValues(new Uint8Array(16)),iv=crypto.getRandomValues(new Uint8Array(12));
   const key=await deriveKey(pass,salt);
@@ -1384,6 +1393,7 @@ async function syncGistId(cfg){
 }
 async function syncPush(){
   const cfg=loadSyncCfg();if(!cfg.enabled||!cfg.token||!cfg.pass)return;
+  if(isEmptyState(S))return; // un dispositivo sin datos solo baja, nunca sube
   const id=await syncGistId(cfg);
   const blob=JSON.stringify({S:S,INFORME:(typeof window.INFORME!=='undefined'?window.INFORME:null),at:Date.now()});
   const payload=await encStr(cfg.pass,blob);
@@ -1419,7 +1429,7 @@ async function syncBoot(){
   updateSyncStatus('Sincronizando…');
   try{
     const remote=await syncPull();
-    if(remote&&remote.S&&(remote.S.updatedAt||0)>(S.updatedAt||0)){ adoptRemote(remote); }
+    if(remoteWins(remote)){ adoptRemote(remote); }
     else { await syncPush(); }
     updateSyncStatus();
   }catch(e){updateSyncStatus(e.message);}
@@ -1433,7 +1443,7 @@ async function syncConnect(btn){
   saveSyncCfg({token,pass,enabled:true,gistId:null});
   try{
     const remote=await syncPull();
-    if(remote&&remote.S&&(remote.S.updatedAt||0)>(S.updatedAt||0)){ adoptRemote(remote); }
+    if(remoteWins(remote)){ adoptRemote(remote); }
     else { await syncPush(); }
     toast('Sincronización activada');
     document.getElementById('sync-token').value='';document.getElementById('sync-pass').value='';
