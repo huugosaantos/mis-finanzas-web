@@ -218,6 +218,14 @@
   .nw-wrap{position:relative}
   .nw-tip{position:absolute;top:-4px;transform:translateX(-50%);background:var(--text);color:var(--bg);font-size:12px;line-height:1.35;padding:5px 9px;border-radius:7px;pointer-events:none;opacity:0;transition:opacity .12s;white-space:nowrap;z-index:3;box-shadow:var(--shadow)}
   .nw-tip b{display:block;font-size:13px;font-weight:600}
+  /* ---- Movimientos recurrentes ---- */
+  .rec-item{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:12px 0;border-bottom:1px solid var(--border)}
+  .rec-item:last-child{border-bottom:0}
+  .rec-item.off{opacity:.55}
+  .rec-note{font-size:14px;font-weight:600;letter-spacing:-.01em}
+  .rec-meta{font-size:12.5px;color:var(--faint);margin-top:3px}
+  .rec-right{display:flex;align-items:center;gap:10px;flex-shrink:0}
+  .rec-amount{font-size:14px;font-weight:600;white-space:nowrap}
   /* ---- Micro-interacciones ---- */
   tbody tr{transition:background .13s ease}
   tbody tr:hover{background:var(--surface-2)}
@@ -366,6 +374,20 @@
     <div class="card"><div class="tbl-wrap"><table><thead><tr>
       <th>Fecha</th><th>Concepto</th><th>Categoría</th><th></th><th class="num">Importe</th><th></th>
     </tr></thead><tbody id="tx-body"></tbody></table></div></div>
+    <div class="card pad-lg" style="margin-top:16px">
+      <div class="section-title">Movimientos fijos (recurrentes)</div>
+      <div class="set-hint" style="margin-bottom:6px">Nómina, alquiler, suscripciones… se apuntan solos cada periodo, en la cuenta que elijas.</div>
+      <div id="rec-list"></div>
+      <div class="add-row" style="margin-top:14px">
+        <div class="field" style="flex:0 0 120px"><label>Tipo</label><select id="rec-type"><option value="expense">Gasto</option><option value="income">Ingreso</option></select></div>
+        <div class="field"><label>Concepto</label><input id="rec-note" placeholder="Alquiler, Netflix, Nómina…"></div>
+        <div class="field" style="flex:0 0 120px"><label>Importe</label><input type="number" id="rec-amount" step="0.01" placeholder="0,00"></div>
+        <div class="field" style="flex:0 0 150px"><label>Cuenta</label><select id="rec-account"></select></div>
+        <div class="field" style="flex:0 0 120px"><label>Frecuencia</label><select id="rec-freq" onchange="updateRecDayField()"><option value="monthly">Mensual</option><option value="weekly">Semanal</option><option value="yearly">Anual</option></select></div>
+        <div class="field" style="flex:0 0 130px" id="rec-day-wrap"></div>
+        <button class="btn" onclick="addRecurring()">Añadir fijo</button>
+      </div>
+    </div>
   </section>
 
   <!-- PRESUPUESTO -->
@@ -564,7 +586,7 @@ function buildSeed(){
   // Copia pública LIMPIA: sin datos personales. Cada usuario empieza en blanco;
   // en el móvil, tus datos llegan cifrados desde tu GitHub al activar la sincronización.
   return{
-    transactions:[],accounts:[],holdings:[],budgets:[],goals:[],history:[],rules:{},
+    transactions:[],accounts:[],holdings:[],budgets:[],goals:[],history:[],rules:{},recurring:[],
     settings:{currency:'EUR',locale:'es-ES',theme:'light'}
   };
 }
@@ -605,6 +627,87 @@ function fillTxAccounts(){ const sel=document.getElementById('tx-account'); if(!
 function migrateTxAccounts(){ if(!Array.isArray(S.transactions))return; const d=defaultTxAccount(); let changed=false;
   S.transactions.forEach(t=>{ if(t.applied)return; if(!t.account&&d)t.account=d.id; applyTx(t,+1); t.applied=true; changed=true; });
   if(changed)save(); }
+
+/* ---- Movimientos recurrentes (nómina, alquiler, suscripciones) ---- */
+const WEEKDAYS=['domingo','lunes','martes','miércoles','jueves','viernes','sábado'];
+const MESES=['enero','febrero','marzo','abril','mayo','junio','julio','agosto','septiembre','octubre','noviembre','diciembre'];
+function isoDate(d){return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');}
+function yesterdayISO(){const d=new Date();d.setDate(d.getDate()-1);return isoDate(d);}
+function recOccurrences(rule,afterISO,throughISO){
+  const out=[],after=new Date(afterISO+'T12:00:00'),through=new Date(throughISO+'T12:00:00');
+  if(isNaN(after)||isNaN(through)||through<after)return out;
+  if(rule.freq==='weekly'){
+    const wd=Number(rule.day);let d=new Date(after);d.setDate(d.getDate()+1);let g=0;
+    while(d<=through&&g++<2000){if(d.getDay()===wd)out.push(isoDate(d));d.setDate(d.getDate()+1);}
+  }else if(rule.freq==='yearly'){
+    const p=String(rule.day).split('-'),mm=Number(p[0])||1,dd=Number(p[1])||1;
+    for(let y=after.getFullYear();y<=through.getFullYear()+1;y++){const o=new Date(y,mm-1,dd,12,0,0);if(o>after&&o<=through)out.push(isoDate(o));}
+  }else{
+    const day=Number(rule.day)||1;let y=after.getFullYear(),m=after.getMonth(),g=0;
+    while(g++<600){const dim=new Date(y,m+1,0).getDate();const o=new Date(y,m,Math.min(day,dim),12,0,0);
+      if(o>after&&o<=through)out.push(isoDate(o));m++;if(m>11){m=0;y++;}if(new Date(y,m,1,12,0,0)>through)break;}
+  }
+  return out;
+}
+function recNext(rule){const t=new Date();t.setDate(t.getDate()+400);return recOccurrences(rule,rule.lastRun||yesterdayISO(),isoDate(t))[0]||null;}
+function recFreqText(rule){
+  if(rule.freq==='weekly')return 'cada '+WEEKDAYS[Number(rule.day)];
+  if(rule.freq==='yearly'){const p=String(rule.day).split('-');return 'cada '+(Number(p[1])||1)+' de '+MESES[(Number(p[0])||1)-1];}
+  return 'cada mes, día '+(Number(rule.day)||1);
+}
+function processRecurring(){
+  const rules=S.recurring||[];if(!rules.length)return;const today0=today();let count=0;
+  rules.forEach(rule=>{
+    if(!rule.enabled)return;
+    const occ=recOccurrences(rule,rule.lastRun||yesterdayISO(),today0);
+    occ.forEach(date=>{const t={id:uid(),date,type:rule.type,category:rule.category||'Otros',note:rule.note||'—',amount:rule.amount,account:rule.account||null,applied:true,recurring:rule.id};S.transactions.push(t);applyTx(t,+1);count++;});
+    if(occ.length)rule.lastRun=occ[occ.length-1];
+  });
+  if(count){S.transactions.sort((a,b)=>b.date.localeCompare(a.date));save();toast(count+(count>1?' movimientos fijos añadidos':' movimiento fijo añadido'));}
+}
+function fillRecAccounts(){const sel=document.getElementById('rec-account');if(!sel)return;const prev=sel.value;
+  sel.innerHTML=(S.accounts||[]).filter(a=>a.type!=='debt').map(a=>`<option value="${a.id}">${esc(a.name)}</option>`).join('');
+  if(prev&&(S.accounts||[]).some(a=>a.id===prev))sel.value=prev;else{const d=defaultTxAccount();if(d)sel.value=d.id;}}
+function updateRecDayField(){
+  const w=document.getElementById('rec-day-wrap');if(!w)return;
+  const f=(document.getElementById('rec-freq')||{}).value||'monthly';
+  if(f==='weekly')w.innerHTML='<label>Día</label><select id="rec-day"><option value="1">Lunes</option><option value="2">Martes</option><option value="3">Miércoles</option><option value="4">Jueves</option><option value="5">Viernes</option><option value="6">Sábado</option><option value="0">Domingo</option></select>';
+  else if(f==='yearly')w.innerHTML='<label>Fecha</label><input type="date" id="rec-day">';
+  else w.innerHTML='<label>Día del mes</label><input type="number" id="rec-day" min="1" max="31" value="1">';
+}
+function addRecurring(){
+  const amount=parseFloat(document.getElementById('rec-amount').value);
+  if(!amount||amount<=0)return toast('Pon un importe válido');
+  const note=(document.getElementById('rec-note').value||'').trim()||'Fijo';
+  const type=document.getElementById('rec-type').value,freq=document.getElementById('rec-freq').value;
+  const account=(document.getElementById('rec-account')||{}).value||(defaultTxAccount()||{}).id||null;
+  const dayEl=document.getElementById('rec-day');let day;
+  if(freq==='yearly'){const v=dayEl.value;if(!v)return toast('Elige una fecha');const p=v.split('-');day=p[1]+'-'+p[2];}
+  else day=dayEl.value;
+  const rule={id:uid(),type,category:categorize(note,type)||'Otros',note,amount,account,freq,day,enabled:true,lastRun:yesterdayISO()};
+  S.recurring=S.recurring||[];S.recurring.push(rule);
+  document.getElementById('rec-amount').value='';document.getElementById('rec-note').value='';
+  processRecurring();save();renderAll();toast('Movimiento fijo creado');
+}
+function delRecurring(id){if(!Array.isArray(S.recurring))return;const i=S.recurring.findIndex(r=>r.id===id);if(i<0)return;const item=S.recurring[i];S.recurring.splice(i,1);save();renderAll();showUndo('Fijo eliminado',()=>{S.recurring.splice(Math.min(i,S.recurring.length),0,item);save();renderAll();});}
+function toggleRecurring(id){const r=(S.recurring||[]).find(x=>x.id===id);if(!r)return;r.enabled=!r.enabled;if(r.enabled)r.lastRun=yesterdayISO();save();processRecurring();renderAll();}
+function renderRecurring(){
+  const box=document.getElementById('rec-list');if(!box)return;
+  const rules=S.recurring||[];
+  if(!rules.length){box.innerHTML='<div class="empty" style="padding:18px">Sin fijos aún. Añade uno abajo (nómina, alquiler, Netflix…).</div>';return;}
+  box.innerHTML=rules.map(r=>{const nx=recNext(r);
+    return `<div class="rec-item${r.enabled?'':' off'}">
+      <div style="min-width:0">
+        <div class="rec-note">${esc(r.note)} <span class="badge ${r.type==='income'?'in':'out'}">${r.type==='income'?'Ingreso':'Gasto'}</span></div>
+        <div class="rec-meta">${recFreqText(r)}${nx?' · próximo '+fmtDate(nx):''}${r.enabled?'':' · en pausa'}</div>
+      </div>
+      <div class="rec-right">
+        <div class="rec-amount" style="color:${r.type==='income'?'var(--pos)':'var(--text)'}">${r.type==='income'?'+':'−'}${fmt(r.amount)}</div>
+        <button class="icon-btn" title="${r.enabled?'Pausar':'Activar'}" onclick="toggleRecurring('${r.id}')">${r.enabled?'⏸':'▶'}</button>
+        <button class="icon-btn" title="Eliminar" onclick="delRecurring('${r.id}')">✕</button>
+      </div>
+    </div>`;}).join('');
+}
 
 /* ---------------- navegación ---------------- */
 document.querySelectorAll('.nav-item').forEach(b=>b.onclick=()=>{
@@ -1612,7 +1715,7 @@ async function refreshPrices(){
 /* ---------------- render maestro ---------------- */
 function renderAll(){
   renderPanel();renderInforme();renderTx();renderBudget();renderPatrimonio();renderInv();renderGoals();renderAdvisor();
-  fillBudgetCat();fillTxAccounts();
+  fillBudgetCat();fillTxAccounts();renderRecurring();fillRecAccounts();
 }
 function fillBudgetCat(){document.getElementById('bg-cat').innerHTML=DEF_CATS.expense.map(c=>`<option>${c}</option>`).join('');}
 
@@ -1646,10 +1749,12 @@ applyTheme();
 migrateHistory();
 migrateTxAccounts();
 applyInformePrices();
+updateRecDayField();
 if(syncEnabled()){
   renderAll();
-  syncBoot().then(()=>{recordSnapshot();renderPanel();});
+  syncBoot().then(()=>{processRecurring();recordSnapshot();renderAll();});
 }else{
+  processRecurring();
   recordSnapshot();
   renderAll();
 }
