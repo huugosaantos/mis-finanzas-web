@@ -353,8 +353,8 @@
 
   <!-- INFORME -->
   <section class="view" id="view-informe">
-    <div class="page-head"><div><h1>Informe diario</h1><p id="informe-sub">Tu resumen de mercado, cada mañana a las 9:00</p></div>
-      <button class="btn ghost sm" onclick="refreshPrices()"><span class="bic" data-i="refresh"></span>Actualizar precios</button></div>
+    <div class="page-head"><div><h1>Informe diario</h1><p id="informe-sub">Tu resumen de mercado, cada mañana</p></div>
+      <button class="btn ghost sm" onclick="generateInforme(true)"><span class="bic" data-i="refresh"></span>Regenerar</button></div>
     <div id="informe-content"></div>
   </section>
 
@@ -1535,7 +1535,8 @@ async function syncPull(){
 function adoptRemote(remote){
   _applyingRemote=true;
   S=remote.S;
-  if(remote.INFORME)window.INFORME=remote.INFORME;
+  if(!S.informe&&remote.INFORME)S.informe=remote.INFORME;
+  if(S.informe)window.INFORME=S.informe; else if(remote.INFORME)window.INFORME=remote.INFORME;
   localStorage.setItem(KEY,JSON.stringify(S));
   _applyingRemote=false;
   migrateHistory();migrateTxAccounts();applyTheme();renderAll();
@@ -1614,10 +1615,11 @@ function loadDemo(){
 
 /* ---------------- Informe diario ---------------- */
 // El agente de las 9:00 reescribe informe.js con window.INFORME = {fecha, generado, precios:{TICKER:€}, narrativa_html}
-function haveInforme(){return typeof window.INFORME!=='undefined'&&window.INFORME&&(window.INFORME.narrativa_html||(Array.isArray(window.INFORME.activos)&&window.INFORME.activos.length));}
+function curInforme(){return S.informe||(typeof window.INFORME!=='undefined'?window.INFORME:null);}
+function haveInforme(){const I=curInforme();return !!(I&&(I.narrativa_html||(Array.isArray(I.activos)&&I.activos.length)));}
 function applyInformePrices(){
-  const I=window.INFORME;
-  if(typeof I==='undefined'||!I||!I.precios)return false;
+  const I=curInforme();
+  if(!I||!I.precios)return false;
   const stamp=(I.generado||I.fecha||'');
   // Solo aplicamos los precios cuando el informe es NUEVO. Así no pisamos las
   // ediciones manuales ni el botón "Actualizar cripto" en cada recarga.
@@ -1655,11 +1657,12 @@ function renderInforme(){
   const box=document.getElementById('informe-content');
   const sub=document.getElementById('informe-sub');
   if(!haveInforme()){
-    sub.textContent='Tu resumen de mercado, cada mañana a las 9:00';
-    box.innerHTML=`<div class="card">${emptyState('informe','Aún no hay informe','El primero se genera solo mañana a las 9:00 (o la próxima vez que abras la app después de esa hora). Mientras, puedes actualizar la cripto con el botón de arriba.')}</div>`;
+    if(_genInforme){ sub.textContent='Generando tu informe…'; box.innerHTML=`<div class="card"><div class="empty" style="padding:44px 20px">Generando tu informe con precios en vivo…</div></div>`; return; }
+    sub.textContent='Tu resumen de mercado';
+    box.innerHTML=`<div class="card">${emptyState('informe','Aún no hay informe','Créalo con precios en vivo. Se genera solo cada mañana al abrir la app.',`<button class="btn sm" onclick="generateInforme(true)">Generar informe de hoy</button>`)}</div>`;
     return;
   }
-  const I=window.INFORME, fresca=I.fecha===today();
+  const I=curInforme(), fresca=I.fecha===today();
   sub.textContent='Generado '+(I.generado||I.generado_txt||I.fecha||'')+(fresca?'':' · puede estar desactualizado');
   if(Array.isArray(I.activos)&&I.activos.length){
     const grupo=c=>I.activos.filter(a=>a.clase===c);
@@ -1674,6 +1677,63 @@ function renderInforme(){
     box.innerHTML=`<div class="card pad-lg informe-body">${I.narrativa_html}</div>`;
   }
 }
+/* ---- Informe generado en el navegador (gratis, funciona en el móvil sin el PC) ---- */
+let _genInforme=false;
+function informeStamp(){const d=new Date();return d.toLocaleDateString(S.settings.locale,{day:'numeric',month:'long'})+', '+d.toLocaleTimeString(S.settings.locale,{hour:'2-digit',minute:'2-digit'});}
+function pctTxt(p){if(p==null||!isFinite(p))return '';return (p>=0?'+':'−')+Math.abs(p).toFixed(1).replace('.',',')+'%';}
+function priorActivo(ticker){const I=curInforme();const a=(I&&I.activos||[]).find(x=>x.ticker===ticker);return a||{};}
+// El informe rico del agente de escritorio (window.INFORME de informe.js) manda sobre el auto-generado.
+function reconcileInforme(){
+  const w=(typeof window.INFORME!=='undefined')?window.INFORME:null;
+  if(w&&(w.narrativa_html||(w.activos&&w.activos.length))){
+    const s=S.informe;
+    if(!s||(w.fecha||'')>(s.fecha||'')||((w.fecha||'')===(s.fecha||'')&&s.source==='auto')){ S.informe=Object.assign({},w,{source:'agent'}); save(); }
+  }
+  if(S.informe)window.INFORME=S.informe;
+}
+function maybeAutoInforme(){ if(!S.holdings.length)return; const I=S.informe; if(!I||I.fecha!==today())generateInforme(false); }
+async function generateInforme(manual){
+  if(!S.holdings.length){if(manual)toast('No tienes inversiones');return;}
+  if(_genInforme)return; _genInforme=true;
+  toast(manual?'Generando informe…':'Actualizando informe…'); if(!haveInforme())renderInforme();
+  try{
+    const curU=(S.settings.currency||'EUR').toUpperCase(),cur=curU.toLowerCase();
+    const precios={},changes={};
+    const cryptoIds=[...new Set(S.holdings.map(h=>CRYPTO_MAP[h.ticker]).filter(Boolean))];
+    if(cryptoIds.length){
+      try{const r=await fetch('https://api.coingecko.com/api/v3/simple/price?ids='+cryptoIds.join(',')+'&vs_currencies='+cur+'&include_24hr_change=true');
+        if(r.ok){const d=await r.json();S.holdings.forEach(h=>{const id=CRYPTO_MAP[h.ticker];if(id&&d[id]&&typeof d[id][cur]==='number'){precios[h.ticker]=d[id][cur];const ch=d[id][cur+'_24h_change'];if(typeof ch==='number')changes[h.ticker]=ch;}});}
+      }catch(e){}
+    }
+    const stocks=S.holdings.filter(h=>!CRYPTO_MAP[h.ticker]);
+    const quotes=await Promise.all(stocks.map(async h=>{try{return{h,q:await yahooQuote(YSYM_FIX[h.ticker]||h.ysym||h.ticker)};}catch(e){return{h,q:null};}}));
+    const need=[...new Set(quotes.filter(x=>x.q&&x.q.cur&&x.q.cur!==curU).map(x=>x.q.cur))],fx={};
+    await Promise.all(need.map(async c=>{try{fx[c]=(await yahooQuote(c+curU+'=X')).price;}catch(e){fx[c]=null;}}));
+    quotes.forEach(({h,q})=>{if(!q)return;let p=q.price;if(q.cur&&q.cur!==curU){const rate=fx[q.cur];if(rate==null)return;p=p*rate;}precios[h.ticker]=p;if(q.changePct!=null)changes[h.ticker]=q.changePct;});
+    S.holdings.forEach(h=>{if(typeof precios[h.ticker]==='number'&&precios[h.ticker]>0)h.price=precios[h.ticker];});
+    const activos=S.holdings.map(h=>{
+      const prev=priorActivo(h.ticker),clase=CRYPTO_MAP[h.ticker]?'cripto':(h.ticker==='IWDA'?'fondo':'accion');
+      const price=h.price,cost=h.shares*h.avgCost,g=h.shares*price-cost,gp=cost?g/cost*100:0,cd=changes[h.ticker];
+      const paraTi=(g>=0?'Vas ganando ':'Estás en pérdidas ')+(g>=0?'+':'−')+fmt(Math.abs(g))+' ('+(g>=0?'+':'−')+Math.abs(gp).toFixed(0)+'%) sobre tu coste medio de '+fmt(h.avgCost)+'.';
+      return {ticker:h.ticker,nombre:prev.nombre||h.name||h.ticker,clase,precio_eur:price,cambio_dia:(cd!=null?pctTxt(cd):(prev.cambio_dia||'')),valoracion:prev.valoracion||'',rec_pct:prev.rec_pct||0,objetivo:prev.objetivo||'',potencial:prev.potencial||'',titular:prev.titular||'',para_ti:paraTi};
+    });
+    const val=invValue(),cost=invCost(),gain=val-cost,gpct=cost?gain/cost*100:0,upc=gain>=0?'pos':'neg';
+    let best=null,worst=null;
+    activos.forEach(a=>{const c=changes[a.ticker];if(c==null)return;if(best===null||c>changes[best])best=a.ticker;if(worst===null||c<changes[worst])worst=a.ticker;});
+    const money=v=>fmt(v);
+    const destaca=(best!=null)?` Hoy destaca <b>${esc(best)}</b> (${pctTxt(changes[best])})${(worst!=null&&worst!==best)?` y flojea <b>${esc(worst)}</b> (${pctTxt(changes[worst])})`:''}.`:'';
+    const resumen=`<h2>Buenos días, Hugo ☕</h2>
+<p>Tu cartera de inversión vale <span class="${upc}">${money(val)}</span> y acumula ${gain>=0?'una ganancia':'una pérdida'} de <span class="${upc}">${gain>=0?'+':'−'}${money(Math.abs(gain))}</span> (${gain>=0?'+':'−'}${Math.abs(gpct).toFixed(0)}% sobre lo invertido).${destaca}</p>
+<p style="font-size:12.5px;color:var(--faint)">Informe generado en tu dispositivo con precios en vivo. Las noticias y valoraciones de analistas se actualizan al abrir la versión de escritorio.</p>`;
+    const cierre=`<p><b>En una línea:</b> ${gain>=0?'tu cartera sigue en verde':'tu cartera está en negativo'}, ${money(val)} en total. Mantén el rumbo de largo plazo y no te dejes llevar por el ruido de un día.</p>
+<p style="font-size:12px;opacity:.6">Datos informativos, no consejo de inversión.</p>`;
+    S.informe={fecha:today(),generado:informeStamp(),source:'auto',precios,activos,resumen_html:resumen,cierre_html:cierre};
+    window.INFORME=S.informe; S.lastInforme=S.informe.generado;
+    save();recordSnapshot();renderAll();
+    toast(manual?'Informe regenerado':'Informe listo');
+  }catch(e){ toast('No se pudo generar el informe'); }
+  finally{ _genInforme=false; renderInforme(); }
+}
 const CRYPTO_MAP={BTC:'bitcoin',ETH:'ethereum',XRP:'ripple'};
 const YSYM_FIX={IWDA:'IWDA.AS'}; // símbolos Yahoo para tickers que necesitan sufijo de mercado
 async function yahooQuote(sym){
@@ -1683,7 +1743,9 @@ async function yahooQuote(sym){
   const j=await r.json();
   const m=j&&j.chart&&j.chart.result&&j.chart.result[0]&&j.chart.result[0].meta;
   if(!m||typeof m.regularMarketPrice!=='number')throw new Error('sin datos');
-  return {price:m.regularMarketPrice,cur:m.currency};
+  const prev=(typeof m.previousClose==='number'?m.previousClose:m.chartPreviousClose);
+  const changePct=(typeof prev==='number'&&prev)?((m.regularMarketPrice-prev)/prev*100):null;
+  return {price:m.regularMarketPrice,cur:m.currency,changePct};
 }
 // Actualiza precios: cripto por CoinGecko (sin clave) y acciones/ETFs por Yahoo (proxy CORS), convirtiendo a tu moneda.
 async function refreshPrices(){
@@ -1748,15 +1810,17 @@ injectIcons();
 applyTheme();
 migrateHistory();
 migrateTxAccounts();
+reconcileInforme();
 applyInformePrices();
 updateRecDayField();
 if(syncEnabled()){
   renderAll();
-  syncBoot().then(()=>{processRecurring();recordSnapshot();renderAll();});
+  syncBoot().then(()=>{reconcileInforme();processRecurring();recordSnapshot();renderAll();maybeAutoInforme();});
 }else{
   processRecurring();
   recordSnapshot();
   renderAll();
+  maybeAutoInforme();
 }
 runCountUps('view-panel');
 </script>
